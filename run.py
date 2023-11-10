@@ -26,7 +26,7 @@ TELEGRAM_USER = os.environ.get("TELEGRAM_USER")
 APP_URL = os.environ.get("APP_URL")
 
 # Port number for Telegram bot web hook
-PORT = int(os.environ.get('PORT', '8443'))
+PORT = int(os.environ.get('PORT', '443'))
 
 # Enables logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
