@@ -101,7 +101,7 @@ def ParseSignal(signal: str) -> dict:
     trade['PositionSize'] = 0.01  # You can adjust this lot size as per your requirement
 
     # Fixed take profit at 50 pips
-    trade['TP'] = [float((signal[3].split())[-1]) + 50]
+    trade['TP'] = [float((signal[2].split())[-1]) + 50]
 
     # adds risk factor to trade
     trade['RiskFactor'] = RISK_FACTOR
