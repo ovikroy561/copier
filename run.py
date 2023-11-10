@@ -96,8 +96,10 @@ def ParseSignal(signal: str) -> dict:
 
 
 
+
+
 def GetTradeInformation(update: Update, trade: dict, balance: float) -> None:
-    """Calculates information from given trade including stop loss and take profit in pips, posiition size, and potential loss/profit.
+    """Calculates information from given trade including stop loss and take profit in pips, position size, and potential loss/profit.
 
     Arguments:
         update: update from Telegram
@@ -105,21 +107,30 @@ def GetTradeInformation(update: Update, trade: dict, balance: float) -> None:
         balance: current balance of the MetaTrader account
     """
 
+    # Helper function to calculate stop loss in pips
+    def calculate_stop_loss_pips(entry, stop_loss, multiplier):
+        return abs(round((stop_loss - entry) / multiplier))
+
+    # Helper function to handle None values in stop loss
+    def handle_none_stop_loss():
+        # If stop loss is None, you can handle it accordingly.
+        # For example, set stopLossPips to a default value.
+        return 0
+
     # calculates the stop loss in pips
-    if(trade['Symbol'] == 'XAUUSD'):
-        multiplier = 0.1
+    if trade['StopLoss'] is not None:
+        if trade['Symbol'] == 'XAUUSD':
+            multiplier = 0.1
+        elif trade['Symbol'] == 'XAGUSD':
+            multiplier = 0.001
+        elif str(trade['Entry']).index('.') >= 2:
+            multiplier = 0.01
+        else:
+            multiplier = 0.0001
 
-    elif(trade['Symbol'] == 'XAGUSD'):
-        multiplier = 0.001
-
-    elif(str(trade['Entry']).index('.') >= 2):
-        multiplier = 0.01
-
+        stopLossPips = calculate_stop_loss_pips(trade['Entry'], trade['StopLoss'], multiplier)
     else:
-        multiplier = 0.0001
-
-    # calculates the stop loss in pips
-    stopLossPips = abs(round((trade['StopLoss'] - trade['Entry']) / multiplier))
+        stopLossPips = handle_none_stop_loss()
 
     # calculates the position size using stop loss and RISK FACTOR
     trade['PositionSize'] = math.floor(((balance * trade['RiskFactor']) / stopLossPips) / 10 * 100) / 100
@@ -131,11 +142,12 @@ def GetTradeInformation(update: Update, trade: dict, balance: float) -> None:
 
     # creates table with trade information
     table = CreateTable(trade, balance, stopLossPips, takeProfitPips)
-    
-    # sends user trade information and calcualted risk
+
+    # sends user trade information and calculated risk
     update.effective_message.reply_text(f'<pre>{table}</pre>', parse_mode=ParseMode.HTML)
 
     return
+
 
 def CreateTable(trade: dict, balance: float, stopLossPips: int, takeProfitPips: int) -> PrettyTable:
     """Creates PrettyTable object to display trade information to user.
