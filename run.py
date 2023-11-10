@@ -45,7 +45,7 @@ RISK_FACTOR = float(os.environ.get("RISK_FACTOR"))
 
 # Helper Functions
 def ParseSignal(signal: str) -> dict:
-    """Starts the process of parsing the signal and entering a trade on MetaTrader account.
+    """Starts the process of parsing the signal and entering the trade on the MetaTrader account.
 
     Arguments:
         signal: trading signal
@@ -54,29 +54,17 @@ def ParseSignal(signal: str) -> dict:
         a dictionary that contains trade signal information
     """
 
-    # converts message to a list of strings for parsing
+    # converts the message to a list of strings for parsing
     signal = signal.splitlines()
     signal = [line.rstrip() for line in signal]
 
     trade = {}
 
     # determines the order type of the trade
-    if 'Buy Limit'.lower() in signal[0].lower():
-        trade['OrderType'] = 'Buy Limit'
-
-    elif 'Sell Limit'.lower() in signal[0].lower():
-        trade['OrderType'] = 'Sell Limit'
-
-    elif 'Buy Stop'.lower() in signal[0].lower():
-        trade['OrderType'] = 'Buy Stop'
-
-    elif 'Sell Stop'.lower() in signal[0].lower():
-        trade['OrderType'] = 'Sell Stop'
-
-    elif 'Buy'.lower() in signal[0].lower():
+    if 'Buy' in signal[0].lower():
         trade['OrderType'] = 'Buy'
 
-    elif 'Sell'.lower() in signal[0].lower():
+    elif 'Sell' in signal[0].lower():
         trade['OrderType'] = 'Sell'
 
     # returns an empty dictionary if an invalid order type was given
@@ -92,25 +80,19 @@ def ParseSignal(signal: str) -> dict:
 
     # checks whether or not to convert entry to float because of market execution option ("NOW")
     if trade['OrderType'] == 'Buy' or trade['OrderType'] == 'Sell':
-        trade['Entry'] = (signal[1].split())[-1]
-
-    else:
         trade['Entry'] = float((signal[1].split())[-1])
 
-    # Fixed lot size for entry
-    trade['PositionSize'] = 0.01  # You can adjust this lot size as per your requirement
+    # Set fixed lot size for entry when signal comes from Telegram
+    trade['PositionSize'] = 0.01  # Set your fixed lot size here
 
-    # Fixed take profit at 50 pips
-    trade['TP'] = [float((signal[2].split())[-1]) + 50]
-
-    # adds risk factor to trade
-    trade['RiskFactor'] = RISK_FACTOR
+    # Set fixed take profit at 50 pips
+    trade['TP'] = [trade['Entry'] + 0.0050]
 
     return trade
 
 
 def GetTradeInformation(update: Update, trade: dict, balance: float) -> None:
-    """Calculates information from given trade including stop loss and take profit in pips, posiition size, and potential loss/profit.
+    """Calculates information from given trade including take profit in pips, position size, and potential loss/profit.
 
     Arguments:
         update: update from Telegram
@@ -118,37 +100,20 @@ def GetTradeInformation(update: Update, trade: dict, balance: float) -> None:
         balance: current balance of the MetaTrader account
     """
 
-    # calculates the stop loss in pips
-    if(trade['Symbol'] == 'XAUUSD'):
-        multiplier = 0.1
+    # Set fixed take profit(s) in pips
+    takeProfitPips = [50]
 
-    elif(trade['Symbol'] == 'XAGUSD'):
-        multiplier = 0.001
+    # Set fixed position size
+    trade['PositionSize'] = 0.01  # Set your fixed lot size here
 
-    elif(str(trade['Entry']).index('.') >= 2):
-        multiplier = 0.01
+    # creates table with trade information (stop loss is not considered)
+    table = CreateTable(trade, balance, 0, takeProfitPips)
 
-    else:
-        multiplier = 0.0001
-
-    # calculates the stop loss in pips
-    stopLossPips = abs(round((trade['StopLoss'] - trade['Entry']) / multiplier))
-
-    # calculates the position size using stop loss and RISK FACTOR
-    trade['PositionSize'] = math.floor(((balance * trade['RiskFactor']) / stopLossPips) / 10 * 100) / 100
-
-    # calculates the take profit(s) in pips
-    takeProfitPips = []
-    for takeProfit in trade['TP']:
-        takeProfitPips.append(abs(round((takeProfit - trade['Entry']) / multiplier)))
-
-    # creates table with trade information
-    table = CreateTable(trade, balance, stopLossPips, takeProfitPips)
-    
-    # sends user trade information and calcualted risk
+    # sends user trade information and calculated risk
     update.effective_message.reply_text(f'<pre>{table}</pre>', parse_mode=ParseMode.HTML)
 
     return
+
 
 def CreateTable(trade: dict, balance: float, stopLossPips: int, takeProfitPips: int) -> PrettyTable:
     """Creates PrettyTable object to display trade information to user.
