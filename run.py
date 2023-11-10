@@ -82,10 +82,18 @@ def ParseSignal(signal: str) -> dict:
     else:
         trade['Entry'] = float((signal[1].split())[-1])
 
+    # checks if there is a line for stop loss and parses it
+    if len(signal) > 2 and 'SL' in signal[2]:
+        trade['StopLoss'] = float((signal[2].split())[-1])
+    else:
+        # If no stop loss is provided, set it to None or any other default value you prefer.
+        trade['StopLoss'] = None
+
     # adds risk factor to trade
     trade['RiskFactor'] = RISK_FACTOR
 
     return trade
+
 
 
 def GetTradeInformation(update: Update, trade: dict, balance: float) -> None:
