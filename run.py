@@ -45,7 +45,7 @@ RISK_FACTOR = float(os.environ.get("RISK_FACTOR"))
 
 # Helper Functions
 def ParseSignal(signal: str) -> dict:
-    """Starts the process of parsing the signal and entering the trade on the MetaTrader account.
+    """Starts the process of parsing the signal and entering a trade on the MetaTrader account.
 
     Arguments:
         signal: trading signal
@@ -54,39 +54,35 @@ def ParseSignal(signal: str) -> dict:
         a dictionary that contains trade signal information
     """
 
-    # converts the message to a list of strings for parsing
+    # converts message to list of strings for parsing
     signal = signal.splitlines()
     signal = [line.rstrip() for line in signal]
 
     trade = {}
 
     # determines the order type of the trade
-    if 'Buy' in signal[0].lower():
+    if 'BUY' in signal[0].upper():
         trade['OrderType'] = 'Buy'
-
-    elif 'Sell' in signal[0].lower():
+    elif 'SELL' in signal[0].upper():
         trade['OrderType'] = 'Sell'
-
-    # returns an empty dictionary if an invalid order type was given
     else:
-        return {}
+        raise Exception('Invalid trade')
 
-    # extracts the symbol from the trade signal
-    trade['Symbol'] = (signal[0].split())[-1].upper()
+    # extracts symbol from trade signal
+    trade['Symbol'] = signal[1].upper()
 
     # checks if the symbol is valid, if not, returns an empty dictionary
     if trade['Symbol'] not in SYMBOLS:
-        return {}
+        raise Exception('Invalid trade')
 
-    # checks whether or not to convert entry to float because of market execution option ("NOW")
-    if trade['OrderType'] == 'Buy' or trade['OrderType'] == 'Sell':
-        trade['Entry'] = float((signal[1].split())[-1])
+    # checks if the entry is set to 'NOW' for market execution
+    if 'Entry NOW' in signal[2].upper():
+        trade['Entry'] = 'NOW'
+    else:
+        raise Exception('Invalid trade')
 
-    # Set fixed lot size for entry when signal comes from Telegram
-    trade['PositionSize'] = 0.01  # Set your fixed lot size here
-
-    # Set fixed take profit at 50 pips
-    trade['TP'] = [trade['Entry'] + 0.0050]
+    # Set fixed take profit(s) in pips
+    trade['TP'] = [50]
 
     return trade
 
