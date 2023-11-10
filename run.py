@@ -26,14 +26,15 @@ TELEGRAM_USER = os.environ.get("TELEGRAM_USER")
 APP_URL = os.environ.get("APP_URL")
 
 # Port number for Telegram bot web hook
-PORT = int(os.environ.get('PORT', '443'))
+PORT = int(os.environ.get('PORT', '8443'))
+
 
 # Enables logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # possibles states for conversation handler
-CALCULATE, DECISION = range(2)
+CALCULATE, TRADE, DECISION = range(3)
 
 # allowed FX symbols
 SYMBOLS = ['AUDCAD', 'AUDCHF', 'AUDJPY', 'AUDNZD', 'AUDUSD', 'CADCHF', 'CADJPY', 'CHFJPY', 'EURAUD', 'EURCAD', 'EURCHF', 'EURGBP', 'EURJPY', 'EURNZD', 'EURUSD', 'GBPAUD', 'GBPCAD', 'GBPCHF', 'GBPJPY', 'GBPNZD', 'GBPUSD', 'NOW', 'NZDCAD', 'NZDCHF', 'NZDJPY', 'NZDUSD', 'USDCAD', 'USDCHF', 'USDJPY', 'XAGUSD', 'XAUUSD']
@@ -60,7 +61,19 @@ def ParseSignal(signal: str) -> dict:
     trade = {}
 
     # determines the order type of the trade
-    if('Buy'.lower() in signal[0].lower()):
+    if('Buy Limit'.lower() in signal[0].lower()):
+        trade['OrderType'] = 'Buy Limit'
+
+    elif('Sell Limit'.lower() in signal[0].lower()):
+        trade['OrderType'] = 'Sell Limit'
+
+    elif('Buy Stop'.lower() in signal[0].lower()):
+        trade['OrderType'] = 'Buy Stop'
+
+    elif('Sell Stop'.lower() in signal[0].lower()):
+        trade['OrderType'] = 'Sell Stop'
+
+    elif('Buy'.lower() in signal[0].lower()):
         trade['OrderType'] = 'Buy'
     
     elif('Sell'.lower() in signal[0].lower()):
@@ -76,15 +89,114 @@ def ParseSignal(signal: str) -> dict:
     # checks if the symbol is valid, if not, returns an empty dictionary
     if(trade['Symbol'] not in SYMBOLS):
         return {}
-
-    # checks whether or not to convert entry to float because of market execution option ("NOW")
-    if(trade['OrderType'] == 'Buy' or trade['OrderType'] == 'Sell'):
-        trade['Entry'] = 'NOW'
     
-    # calculates risk factor
+    # checks wheter or not to convert entry to float because of market exectution option ("NOW")
+    if(trade['OrderType'] == 'Buy' or trade['OrderType'] == 'Sell'):
+        trade['Entry'] = (signal[1].split())[-1]
+    
+    else:
+        trade['Entry'] = float((signal[1].split())[-1])
+    
+    trade['StopLoss'] = float((signal[2].split())[-1])
+    trade['TP'] = [float((signal[3].split())[-1])]
+
+    # checks if there's a fourth line and parses it for TP2
+    if(len(signal) > 4):
+        trade['TP'].append(float(signal[4].split()[-1]))
+    
+    # adds risk factor to trade
     trade['RiskFactor'] = RISK_FACTOR
 
     return trade
+
+def GetTradeInformation(update: Update, trade: dict, balance: float) -> None:
+    """Calculates information from given trade including stop loss and take profit in pips, posiition size, and potential loss/profit.
+
+    Arguments:
+        update: update from Telegram
+        trade: dictionary that stores trade information
+        balance: current balance of the MetaTrader account
+    """
+
+    # calculates the stop loss in pips
+    if(trade['Symbol'] == 'XAUUSD'):
+        multiplier = 0.1
+
+    elif(trade['Symbol'] == 'XAGUSD'):
+        multiplier = 0.001
+
+    elif(str(trade['Entry']).index('.') >= 2):
+        multiplier = 0.01
+
+    else:
+        multiplier = 0.0001
+
+    # calculates the stop loss in pips
+    stopLossPips = abs(round((trade['StopLoss'] - trade['Entry']) / multiplier))
+
+    # calculates the position size using stop loss and RISK FACTOR
+    trade['PositionSize'] = math.floor(((balance * trade['RiskFactor']) / stopLossPips) / 10 * 100) / 100
+
+    # calculates the take profit(s) in pips
+    takeProfitPips = []
+    for takeProfit in trade['TP']:
+        takeProfitPips.append(abs(round((takeProfit - trade['Entry']) / multiplier)))
+
+    # creates table with trade information
+    table = CreateTable(trade, balance, stopLossPips, takeProfitPips)
+    
+    # sends user trade information and calcualted risk
+    update.effective_message.reply_text(f'<pre>{table}</pre>', parse_mode=ParseMode.HTML)
+
+    return
+
+def CreateTable(trade: dict, balance: float, stopLossPips: int, takeProfitPips: int) -> PrettyTable:
+    """Creates PrettyTable object to display trade information to user.
+
+    Arguments:
+        trade: dictionary that stores trade information
+        balance: current balance of the MetaTrader account
+        stopLossPips: the difference in pips from stop loss price to entry price
+
+    Returns:
+        a Pretty Table object that contains trade information
+    """
+
+    # creates prettytable object
+    table = PrettyTable()
+    
+    table.title = "Trade Information"
+    table.field_names = ["Key", "Value"]
+    table.align["Key"] = "l"  
+    table.align["Value"] = "l" 
+
+    table.add_row([trade["OrderType"] , trade["Symbol"]])
+    table.add_row(['Entry\n', trade['Entry']])
+
+    table.add_row(['Stop Loss', '{} pips'.format(stopLossPips)])
+
+    for count, takeProfit in enumerate(takeProfitPips):
+        table.add_row([f'TP {count + 1}', f'{takeProfit} pips'])
+
+    table.add_row(['\nRisk Factor', '\n{:,.0f} %'.format(trade['RiskFactor'] * 100)])
+    table.add_row(['Position Size', trade['PositionSize']])
+    
+    table.add_row(['\nCurrent Balance', '\n$ {:,.2f}'.format(balance)])
+    table.add_row(['Potential Loss', '$ {:,.2f}'.format(round((trade['PositionSize'] * 10) * stopLossPips, 2))])
+
+    # total potential profit from trade
+    totalProfit = 0
+
+    for count, takeProfit in enumerate(takeProfitPips):
+        profit = round((trade['PositionSize'] * 10 * (1 / len(takeProfitPips))) * takeProfit, 2)
+        table.add_row([f'TP {count + 1} Profit', '$ {:,.2f}'.format(profit)])
+        
+        # sums potential profit from each take profit target
+        totalProfit += profit
+
+    table.add_row(['\nTotal Profit', '\n$ {:,.2f}'.format(totalProfit)])
+
+    return table
 
 async def ConnectMetaTrader(update: Update, trade: dict, enterTrade: bool):
     """Attempts connection to MetaAPI and MetaTrader to place trade.
@@ -121,6 +233,9 @@ async def ConnectMetaTrader(update: Update, trade: dict, enterTrade: bool):
         logger.info('Waiting for SDK to synchronize to terminal state ...')
         await connection.wait_synchronized()
 
+        # obtains account information from MetaTrader server
+        account_information = await connection.get_account_information()
+
         update.effective_message.reply_text("Successfully connected to MetaTrader!\nCalculating trade risk ... 🤔")
 
         # checks if the order is a market execution to get the current price of symbol
@@ -136,7 +251,7 @@ async def ConnectMetaTrader(update: Update, trade: dict, enterTrade: bool):
                 trade['Entry'] = float(price['ask'])
 
         # produces a table with trade information
-        GetTradeInformation(update, trade, account.state['balance'])
+        GetTradeInformation(update, trade, account_information['balance'])
             
         # checks if the user has indicated to enter trade
         if(enterTrade == True):
@@ -147,11 +262,33 @@ async def ConnectMetaTrader(update: Update, trade: dict, enterTrade: bool):
             try:
                 # executes buy market execution order
                 if(trade['OrderType'] == 'Buy'):
-                    result = await connection.create_market_buy_order(trade['Symbol'], trade['PositionSize'], None, trade['TP'][0])
+                    for takeProfit in trade['TP']:
+                        result = await connection.create_market_buy_order(trade['Symbol'], trade['PositionSize'] / len(trade['TP']), trade['StopLoss'], takeProfit)
+
+                # executes buy limit order
+                elif(trade['OrderType'] == 'Buy Limit'):
+                    for takeProfit in trade['TP']:
+                        result = await connection.create_limit_buy_order(trade['Symbol'], trade['PositionSize'] / len(trade['TP']), trade['Entry'], trade['StopLoss'], takeProfit)
+
+                # executes buy stop order
+                elif(trade['OrderType'] == 'Buy Stop'):
+                    for takeProfit in trade['TP']:
+                        result = await connection.create_stop_buy_order(trade['Symbol'], trade['PositionSize'] / len(trade['TP']), trade['Entry'], trade['StopLoss'], takeProfit)
 
                 # executes sell market execution order
                 elif(trade['OrderType'] == 'Sell'):
-                    result = await connection.create_market_sell_order(trade['Symbol'], trade['PositionSize'], None, trade['TP'][0])
+                    for takeProfit in trade['TP']:
+                        result = await connection.create_market_sell_order(trade['Symbol'], trade['PositionSize'] / len(trade['TP']), trade['StopLoss'], takeProfit)
+
+                # executes sell limit order
+                elif(trade['OrderType'] == 'Sell Limit'):
+                    for takeProfit in trade['TP']:
+                        result = await connection.create_limit_sell_order(trade['Symbol'], trade['PositionSize'] / len(trade['TP']), trade['Entry'], trade['StopLoss'], takeProfit)
+
+                # executes sell stop order
+                elif(trade['OrderType'] == 'Sell Stop'):
+                    for takeProfit in trade['TP']:
+                        result = await connection.create_stop_sell_order(trade['Symbol'], trade['PositionSize'] / len(trade['TP']), trade['Entry'], trade['StopLoss'], takeProfit)
                 
                 # sends success message to user
                 update.effective_message.reply_text("Trade entered successfully! 💰")
@@ -170,159 +307,245 @@ async def ConnectMetaTrader(update: Update, trade: dict, enterTrade: bool):
     
     return
 
-def GetTradeInformation(update: Update, trade: dict, balance: float) -> None:
-    """Calculates information from given trade including stop loss and take profit in pips, position size, and potential loss/profit.
+
+# Handler Functions
+def PlaceTrade(update: Update, context: CallbackContext) -> int:
+    """Parses trade and places on MetaTrader account.   
+    
+    Arguments:
+        update: update from Telegram
+        context: CallbackContext object that stores commonly used objects in handler callbacks
+    """
+
+    # checks if the trade has already been parsed or not
+    if(context.user_data['trade'] == None):
+
+        try: 
+            # parses signal from Telegram message
+            trade = ParseSignal(update.effective_message.text)
+            
+            # checks if there was an issue with parsing the trade
+            if(not(trade)):
+                raise Exception('Invalid Trade')
+
+            # sets the user context trade equal to the parsed trade
+            context.user_data['trade'] = trade
+            update.effective_message.reply_text("Trade Successfully Parsed! 🥳\nConnecting to MetaTrader ... \n(May take a while) ⏰")
+        
+        except Exception as error:
+            logger.error(f'Error: {error}')
+            errorMessage = f"There was an error parsing this trade 😕\n\nError: {error}\n\nPlease re-enter trade with this format:\n\nBUY/SELL SYMBOL\nEntry \nSL \nTP \n\nOr use the /cancel to command to cancel this action."
+            update.effective_message.reply_text(errorMessage)
+
+            # returns to TRADE state to reattempt trade parsing
+            return TRADE
+    
+    # attempts connection to MetaTrader and places trade
+    asyncio.run(ConnectMetaTrader(update, context.user_data['trade'], True))
+    
+    # removes trade from user context data
+    context.user_data['trade'] = None
+
+    return ConversationHandler.END
+
+def CalculateTrade(update: Update, context: CallbackContext) -> int:
+    """Parses trade and places on MetaTrader account.   
+    
+    Arguments:
+        update: update from Telegram
+        context: CallbackContext object that stores commonly used objects in handler callbacks
+    """
+
+    # checks if the trade has already been parsed or not
+    if(context.user_data['trade'] == None):
+
+        try: 
+            # parses signal from Telegram message
+            trade = ParseSignal(update.effective_message.text)
+            
+            # checks if there was an issue with parsing the trade
+            if(not(trade)):
+                raise Exception('Invalid Trade')
+
+            # sets the user context trade equal to the parsed trade
+            context.user_data['trade'] = trade
+            update.effective_message.reply_text("Trade Successfully Parsed! 🥳\nConnecting to MetaTrader ... (May take a while) ⏰")
+        
+        except Exception as error:
+            logger.error(f'Error: {error}')
+            errorMessage = f"There was an error parsing this trade 😕\n\nError: {error}\n\nPlease re-enter trade with this format:\n\nBUY/SELL SYMBOL\nEntry \nSL \nTP \n\nOr use the /cancel to command to cancel this action."
+            update.effective_message.reply_text(errorMessage)
+
+            # returns to CALCULATE to reattempt trade parsing
+            return CALCULATE
+    
+    # attempts connection to MetaTrader and calculates trade information
+    asyncio.run(ConnectMetaTrader(update, context.user_data['trade'], False))
+
+    # asks if user if they would like to enter or decline trade
+    update.effective_message.reply_text("Would you like to enter this trade?\nTo enter, select: /yes\nTo decline, select: /no")
+
+    return DECISION
+
+def unknown_command(update: Update, context: CallbackContext) -> None:
+    """Checks if the user is authorized to use this bot or shares to use /help command for instructions.
 
     Arguments:
         update: update from Telegram
-        trade: dictionary that stores trade information
-        balance: current balance of the MetaTrader account
+        context: CallbackContext object that stores commonly used objects in handler callbacks
     """
+    if(not(update.effective_message.chat.username == TELEGRAM_USER)):
+        update.effective_message.reply_text("You are not authorized to use this bot! 🙅🏽‍♂️")
+        return
 
-    # calculates the position size
-    trade['PositionSize'] = math.floor(((balance * trade['RiskFactor']) / (trade['TP'][0] * 10)))
-
-    # produces the position size for user
-    update.effective_message.reply_text(f"Position Size: {trade['PositionSize']} units\n")
+    update.effective_message.reply_text("Unknown command. Use /trade to place a trade or /calculate to find information for a trade. You can also use the /help command to view instructions for this bot.")
 
     return
 
+
 # Command Handlers
-def Calculation_Command(update: Update, context: CallbackContext) -> int:
-    """Calculates trade information from given signal including position size, stop loss and take profit in pips.
+def welcome(update: Update, context: CallbackContext) -> None:
+    """Sends welcome message to user.
 
     Arguments:
         update: update from Telegram
-        context: context from Telegram
-
-    Returns:
-        DECISION: next state in conversation
+        context: CallbackContext object that stores commonly used objects in handler callbacks
     """
 
-    # gets signal from user
-    signal = update.message.text
-
-    # parses trade signal
-    trade = ParseSignal(signal)
-
-    # checks if signal was valid
-    if(bool(trade) == False):
-        update.effective_message.reply_text("Invalid Signal Format! Please enter a valid signal.")
-        return ConversationHandler.END
+    welcome_message = "Welcome to the FX Signal Copier Telegram Bot! 💻💸\n\nYou can use this bot to enter trades directly from Telegram and get a detailed look at your risk to reward ratio with profit, loss, and calculated lot size. You are able to change specific settings such as allowed symbols, risk factor, and more from your personalized Python script and environment variables.\n\nUse the /help command to view instructions and example trades."
     
-    # calculates stop loss and take profit in pips
-    trade['TP'] = [50.0]
-    trade['StopLoss'] = None
+    # sends messages to user
+    update.effective_message.reply_text(welcome_message)
 
-    # produces a table with trade information
-    GetTradeInformation(update, trade, context.user_data['balance'])
+    return
 
-    # prompts user to enter trade
-    update.effective_message.reply_text("Do you want to enter the trade? (yes/no)")
-
-    return DECISION
-
-def CalculateTrade(update: Update, context: CallbackContext) -> int:
-    """Calculates information from given trade including stop loss and take profit in pips, position size, and potential loss/profit.
+def help(update: Update, context: CallbackContext) -> None:
+    """Sends a help message when the command /help is issued
 
     Arguments:
         update: update from Telegram
-        context: context from Telegram
-
-    Returns:
-        DECISION: next state in conversation
+        context: CallbackContext object that stores commonly used objects in handler callbacks
     """
 
-    # gets signal from user
-    signal = update.message.text
+    help_message = "This bot is used to automatically enter trades onto your MetaTrader account directly from Telegram. To begin, ensure that you are authorized to use this bot by adjusting your Python script or environment variables.\n\nThis bot supports all trade order types (Market Execution, Limit, and Stop)\n\nAfter an extended period away from the bot, please be sure to re-enter the start command to restart the connection to your MetaTrader account."
+    commands = "List of commands:\n/start : displays welcome message\n/help : displays list of commands and example trades\n/trade : takes in user inputted trade for parsing and placement\n/calculate : calculates trade information for a user inputted trade"
+    trade_example = "Example Trades 💴:\n\n"
+    market_execution_example = "Market Execution:\nBUY GBPUSD\nEntry NOW\nSL 1.14336\nTP 1.28930\nTP 1.29845\n\n"
+    limit_example = "Limit Execution:\nBUY LIMIT GBPUSD\nEntry 1.14480\nSL 1.14336\nTP 1.28930\n\n"
+    note = "You are able to enter up to two take profits. If two are entered, both trades will use half of the position size, and one will use TP1 while the other uses TP2.\n\nNote: Use 'NOW' as the entry to enter a market execution trade."
 
-    # parses trade signal
-    trade = ParseSignal(signal)
+    # sends messages to user
+    update.effective_message.reply_text(help_message)
+    update.effective_message.reply_text(commands)
+    update.effective_message.reply_text(trade_example + market_execution_example + limit_example + note)
 
-    # checks if signal was valid
-    if(bool(trade) == False):
-        update.effective_message.reply_text("Invalid Signal Format! Please enter a valid signal.")
-        return ConversationHandler.END
-    
-    # calculates stop loss and take profit in pips
-    trade['TP'] = [50.0]
-    trade['StopLoss'] = None
-
-    # produces a table with trade information
-    GetTradeInformation(update, trade, context.user_data['balance'])
-
-    # prompts user to enter trade
-    update.effective_message.reply_text("Do you want to enter the trade? (yes/no)")
-
-    return DECISION
-
-def PlaceTrade(update: Update, context: CallbackContext) -> int:
-    """Places trade on MetaTrader account.
-
-    Arguments:
-        update: update from Telegram
-        context: context from Telegram
-
-    Returns:
-        ConversationHandler.END: ends conversation
-    """
-
-    # gets signal from user
-    signal = update.message.text
-
-    # parses trade signal
-    trade = ParseSignal(signal)
-
-    # checks if signal was valid
-    if(bool(trade) == False):
-        update.effective_message.reply_text("Invalid Signal Format! Please enter a valid signal.")
-        return ConversationHandler.END
-
-    # enters trade on to MetaTrader account
-    asyncio.run(ConnectMetaTrader(update, trade, True))
-
-    return ConversationHandler.END
+    return
 
 def cancel(update: Update, context: CallbackContext) -> int:
-    """Cancels conversation.
+    """Cancels and ends the conversation.   
+    
+    Arguments:
+        update: update from Telegram
+        context: CallbackContext object that stores commonly used objects in handler callbacks
+    """
+
+    update.effective_message.reply_text("Command has been canceled.")
+
+    # removes trade from user context data
+    context.user_data['trade'] = None
+
+    return ConversationHandler.END
+
+def error(update: Update, context: CallbackContext) -> None:
+    """Logs Errors caused by updates.
 
     Arguments:
         update: update from Telegram
-        context: context from Telegram
-
-    Returns:
-        ConversationHandler.END: ends conversation
+        context: CallbackContext object that stores commonly used objects in handler callbacks
     """
 
-    # sends cancellation message
-    update.effective_message.reply_text('Conversation canceled.')
+    logger.warning('Update "%s" caused error "%s"', update, context.error)
+
+    return
+
+def Trade_Command(update: Update, context: CallbackContext) -> int:
+    """Asks user to enter the trade they would like to place.
+
+    Arguments:
+        update: update from Telegram
+        context: CallbackContext object that stores commonly used objects in handler callbacks
+    """
+    if(not(update.effective_message.chat.username == TELEGRAM_USER)):
+        update.effective_message.reply_text("You are not authorized to use this bot! 🙅🏽‍♂️")
+        return ConversationHandler.END
     
-    return ConversationHandler.END
+    # initializes the user's trade as empty prior to input and parsing
+    context.user_data['trade'] = None
+    
+    # asks user to enter the trade
+    update.effective_message.reply_text("Please enter the trade that you would like to place.")
+
+    return TRADE
+
+def Calculation_Command(update: Update, context: CallbackContext) -> int:
+    """Asks user to enter the trade they would like to calculate trade information for.
+
+    Arguments:
+        update: update from Telegram
+        context: CallbackContext object that stores commonly used objects in handler callbacks
+    """
+    if(not(update.effective_message.chat.username == TELEGRAM_USER)):
+        update.effective_message.reply_text("You are not authorized to use this bot! 🙅🏽‍♂️")
+        return ConversationHandler.END
+
+    # initializes the user's trade as empty prior to input and parsing
+    context.user_data['trade'] = None
+
+    # asks user to enter the trade
+    update.effective_message.reply_text("Please enter the trade that you would like to calculate.")
+
+    return CALCULATE
+
 
 def main() -> None:
-    """Starts the bot."""
+    """Runs the Telegram bot."""
 
-    # creates updater with API key from token
-    updater = Updater(TOKEN)
+    updater = Updater(TOKEN, use_context=True)
 
-    # adds a conversation handler to the bot
+    # get the dispatcher to register handlers
+    dp = updater.dispatcher
+
+    # message handler
+    dp.add_handler(CommandHandler("start", welcome))
+
+    # help command handler
+    dp.add_handler(CommandHandler("help", help))
+
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("calculate", Calculation_Command)],
+        entry_points=[CommandHandler("trade", Trade_Command), CommandHandler("calculate", Calculation_Command)],
         states={
+            TRADE: [MessageHandler(Filters.text & ~Filters.command, PlaceTrade)],
             CALCULATE: [MessageHandler(Filters.text & ~Filters.command, CalculateTrade)],
             DECISION: [CommandHandler("yes", PlaceTrade), CommandHandler("no", cancel)]
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
 
-    updater.dispatcher.add_handler(conv_handler)
+    # conversation handler for entering trade or calculating trade information
+    dp.add_handler(conv_handler)
 
-    # starts the Bot
-    updater.start_webhook(listen="0.0.0.0", port=int(PORT), url_path=TOKEN)
-    updater.bot.setWebhook(APP_URL + TOKEN)
+    # message handler for all messages that are not included in conversation handler
+    dp.add_handler(MessageHandler(Filters.text, unknown_command))
 
-    # runs the bot until the user sends a signal to stop
+    # log all errors
+    dp.add_error_handler(error)
+    
+    # listens for incoming updates from Telegram
+    updater.start_webhook(listen="0.0.0.0", port=PORT, url_path=TOKEN, webhook_url=APP_URL + TOKEN)
     updater.idle()
+
+    return
+
 
 if __name__ == '__main__':
     main()
