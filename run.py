@@ -7,6 +7,8 @@ from typing import Literal
 from metaapi_cloud_sdk import MetaApi
 import telegram
 from telegram.ext import CommandHandler, ConversationHandler, Filters, MessageHandler, Updater, CallbackContext
+from prettytable import PrettyTable
+
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
