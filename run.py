@@ -12,6 +12,7 @@ except ImportError:
 from metaapi_cloud_sdk import MetaApi
 from telegram import Update
 from telegram.ext import CommandHandler, Filters, MessageHandler, Updater
+from telegram.ext import CallbackContext
 
 # MetaAPI Credentials
 API_KEY = os.environ.get("API_KEY")
