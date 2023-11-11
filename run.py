@@ -10,9 +10,14 @@ except ImportError:
     from typing_extensions import Literal
 
 from metaapi_cloud_sdk import MetaApi
-from telegram import Update
-from telegram.ext import CommandHandler, Filters, MessageHandler, Updater
+from prettytable import PrettyTable
+from telegram import ParseMode, Update
+from telegram.ext import CommandHandler, Filters, MessageHandler, Updater, ConversationHandler, CallbackContext
+
+# Add the missing import statements
 from telegram.ext import CallbackContext
+from telegram.ext import MessageHandler
+from telegram.ext import Filters
 
 # MetaAPI Credentials
 API_KEY = os.environ.get("API_KEY")
@@ -24,18 +29,22 @@ TELEGRAM_USER = os.environ.get("TELEGRAM_USER")
 
 # Heroku Credentials
 APP_URL = os.environ.get("APP_URL")
+
+# Port number for Telegram bot web hook
 PORT = int(os.environ.get('PORT', '8443'))
 
 # Enables logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# possibles states for conversation handler
+CALCULATE, TRADE, DECISION = range(3)
+
 # allowed FX symbols
-SYMBOLS = ['BTCUSD', 'AUDCHF', 'AUDJPY', 'AUDNZD', 'AUDUSD', 'CADCHF', 'CADJPY', 'CHFJPY', 'EURAUD', 'EURCAD', 'EURCHF', 'EURGBP', 'EURJPY', 'EURNZD', 'EURUSD', 'GBPAUD', 'GBPCAD', 'GBPCHF', 'GBPJPY', 'GBPNZD', 'GBPUSD', 'NOW', 'NZDCAD', 'NZDCHF', 'NZDJPY', 'NZDUSD', 'USDCAD', 'USDCHF', 'USDJPY', 'XAGUSD', 'XAUUSD']
+SYMBOLS = ['AUDCAD', 'AUDCHF', 'AUDJPY', 'AUDNZD', 'AUDUSD', 'CADCHF', 'CADJPY', 'CHFJPY', 'EURAUD', 'EURCAD', 'EURCHF', 'EURGBP', 'EURJPY', 'EURNZD', 'EURUSD', 'GBPAUD', 'GBPCAD', 'GBPCHF', 'GBPJPY', 'GBPNZD', 'GBPUSD', 'NOW', 'NZDCAD', 'NZDCHF', 'NZDJPY', 'NZDUSD', 'USDCAD', 'USDCHF', 'USDJPY', 'XAGUSD', 'XAUUSD']
 
 # RISK FACTOR
 RISK_FACTOR = float(os.environ.get("RISK_FACTOR"))
-
 
 # Helper Functions
 def ParseSignal(signal: str) -> dict:
@@ -55,181 +64,230 @@ def ParseSignal(signal: str) -> dict:
     trade = {}
 
     # determines the order type of the trade
-    if 'BUY' in signal[0].upper():
+    if('Buy Limit'.lower() in signal[0].lower()):
+        trade['OrderType'] = 'Buy Limit'
+
+    elif('Sell Limit'.lower() in signal[0].lower()):
+        trade['OrderType'] = 'Sell Limit'
+
+    elif('Buy Stop'.lower() in signal[0].lower()):
+        trade['OrderType'] = 'Buy Stop'
+
+    elif('Sell Stop'.lower() in signal[0].lower()):
+        trade['OrderType'] = 'Sell Stop'
+
+    elif('Buy'.lower() in signal[0].lower()):
         trade['OrderType'] = 'Buy'
-    elif 'SELL' in signal[0].upper():
+    
+    elif('Sell'.lower() in signal[0].lower()):
         trade['OrderType'] = 'Sell'
+    
+    # returns an empty dictionary if an invalid order type was given
     else:
         return {}
 
     # extracts symbol from trade signal
     trade['Symbol'] = (signal[0].split())[-1].upper()
-
-    # checks wheter or not to convert entry to float because of market exectution option ("NOW")
-    if signal[1].upper() == 'NOW':
-        trade['Entry'] = 'NOW'
+    
+    # checks if the symbol is valid, if not, returns an empty dictionary
+    if(trade['Symbol'] not in SYMBOLS):
+        return {}
+    
+    # checks whether or not to convert entry to float because of market execution option ("NOW")
+    if(trade['OrderType'] == 'Buy' or trade['OrderType'] == 'Sell'):
+        trade['Entry'] = (signal[1].split())[-1]
+    
     else:
         trade['Entry'] = float((signal[1].split())[-1])
-
+    
     trade['StopLoss'] = float((signal[2].split())[-1])
     trade['TP'] = [float((signal[3].split())[-1])]
 
     # checks if there's a fourth line and parses it for TP2
-    if len(signal) > 4:
+    if(len(signal) > 4):
         trade['TP'].append(float(signal[4].split()[-1]))
-
+    
     # adds risk factor to trade
     trade['RiskFactor'] = RISK_FACTOR
 
     return trade
 
-async def ConnectMetaTrader(update: Update, trade: dict, enterTrade: bool):
-    """Attempts connection to MetaAPI and MetaTrader to place trade.
+def GetTradeInformation(update: Update, trade: dict, balance: float) -> None:
+    """Calculates information from given trade including stop loss and take profit in pips, position size, and potential loss/profit.
 
     Arguments:
         update: update from Telegram
         trade: dictionary that stores trade information
-
-    Returns:
-        A coroutine that confirms that the connection to MetaAPI/MetaTrader and trade placement were successful
+        balance: current balance of the MetaTrader account
     """
 
-    # creates connection to MetaAPI
-    api = MetaApi(API_KEY)
+    # calculates the stop loss in pips
+    if(trade['Symbol'] == 'XAUUSD'):
+        multiplier = 0.1
 
-    try:
-        account = await api.metatrader_account_api.get_account(ACCOUNT_ID)
-        initial_state = account.state
-        deployed_states = ['DEPLOYING', 'DEPLOYED']
+    elif(trade['Symbol'] == 'XAGUSD'):
+        multiplier = 0.001
 
-        if initial_state not in deployed_states:
-            # wait until account is deployed and connected to broker
-            logger.info('Deploying account')
-            await account.deploy()
+    elif(str(trade['Entry']).index('.') >= 2):
+        multiplier = 0.01
 
-        logger.info('Waiting for API server to connect to broker ...')
-        await account.wait_connected()
+    else:
+        multiplier = 0.0001
 
-        # connect to MetaApi API
-        connection = account.get_rpc_connection()
-        await connection.connect()
+    # calculates the stop loss in pips
+    stopLossPips = abs(round((trade['StopLoss'] - trade['Entry']) / multiplier))
 
-        # wait until terminal state synchronized to the local state
-        logger.info('Waiting for SDK to synchronize to terminal state ...')
-        await connection.wait_synchronized()
+    # calculates the position size using stop loss and RISK FACTOR
+    trade['PositionSize'] = math.floor(((balance * trade['RiskFactor']) / stopLossPips) / 10 * 100) / 100
 
-        # obtains account information from MetaTrader server
-        account_information = await connection.get_account_information()
+    # calculates the take profit(s) in pips
+    takeProfitPips = []
+    for takeProfit in trade['TP']:
+        takeProfitPips.append(abs(round((takeProfit - trade['Entry']) / multiplier)))
 
-        update.effective_message.reply_text("Successfully connected to MetaTrader!\nCalculating trade risk ... 🤔")
-
-        # checks if the order is a market execution to get the current price of symbol
-        if trade['Entry'] == 'NOW':
-            price = await connection.get_symbol_price(symbol=trade['Symbol'])
-
-            # uses bid price if the order type is a buy
-            if trade['OrderType'] == 'Buy':
-                trade['Entry'] = float(price['bid'])
-
-            # uses ask price if the order type is a sell
-            if trade['OrderType'] == 'Sell':
-                trade['Entry'] = float(price['ask'])
-
-        # prints success message to console
-        logger.info('\nTrade entered successfully!')
-            
-        # checks if the user has indicated to enter trade
-        if enterTrade:
-
-            # enters trade on to MetaTrader account
-            update.effective_message.reply_text("Entering trade on MetaTrader Account ... 👨🏾‍💻")
-
-            try:
-                # executes buy market execution order
-                if trade['OrderType'] == 'Buy':
-                    for takeProfit in trade['TP']:
-                        result = await connection.create_market_buy_order(trade['Symbol'], 1, trade['StopLoss'], takeProfit)
-
-                # executes sell market execution order
-                elif trade['OrderType'] == 'Sell':
-                    for takeProfit in trade['TP']:
-                        result = await connection.create_market_sell_order(trade['Symbol'], 1, trade['StopLoss'], takeProfit)
-                
-                # sends success message to user
-                update.effective_message.reply_text("Trade entered successfully! 💰")
-                
-                # prints success message to console
-                logger.info('Result Code: {}\n'.format(result['stringCode']))
-            
-            except Exception as error:
-                logger.info(f"\nTrade failed with error: {error}\n")
-                update.effective_message.reply_text(f"There was an issue 😕\n\nError Message:\n{error}")
+    # creates table with trade information
+    table = CreateTable(trade, balance, stopLossPips, takeProfitPips)
     
-    except Exception as error:
-        logger.error(f'Error: {error}')
-        update.effective_message.reply_text(f"There was an issue with the connection 😕\n\nError Message:\n{error}")
-    
+    # sends user trade information and calculated risk
+    update.effective_message.reply_text(f'<pre>{table}</pre>', parse_mode=ParseMode.HTML)
+
     return
 
-# Command Handlers
-def PlaceTrade(update: Update, context: CallbackContext) -> None:
-    """Parses trade and places on MetaTrader account.   
+def CreateTable(trade: dict, balance: float, stopLossPips: int, takeProfitPips: int) -> PrettyTable:
+    """Creates PrettyTable object to display trade information to user.
+
+    Arguments:
+        trade: dictionary that stores trade information
+        balance: current balance of the MetaTrader account
+        stopLossPips: the difference in pips from stop loss price to entry price
+
+    Returns:
+        a Pretty Table object that contains trade information
+    """
+
+    # creates prettytable object
+    table = PrettyTable()
     
+    table.title = "Trade Information"
+    table.field_names = ["Key", "Value"]
+    table.align["Key"] = "l"  
+    table.align["Value"] = "l" 
+
+    table.add_row([trade["OrderType"] , trade["Symbol"]])
+    table.add_row(['Entry\n', trade['Entry']])
+
+    table.add_row(['Stop Loss', '{} pips'.format(stopLossPips)])
+
+    for count, takeProfit in enumerate(takeProfitPips):
+        table.add_row([f'Take Profit {count + 1}', f'{takeProfit} pips'])
+
+    table.add_row(['Risk Factor', trade['RiskFactor']])
+    table.add_row(['Balance', balance])
+    table.add_row(['Position Size', trade['PositionSize']])
+    table.add_row(['Potential Loss', round((trade['PositionSize'] * stopLossPips * -1) * trade['RiskFactor'], 2)])
+    table.add_row(['Potential Profit', round((trade['PositionSize'] * takeProfitPips[0]) * trade['RiskFactor'], 2)])
+
+    return table
+
+async def ReceiveSignal(update: Update, context: CallbackContext) -> int:
+    """Receives signal from user and starts process of entering trade on MetaTrader account.
+
     Arguments:
         update: update from Telegram
         context: CallbackContext object that stores commonly used objects in handler callbacks
+
+    Returns:
+        DECISION state for the conversation handler
     """
 
-    try: 
-        # parses signal from Telegram message
-        trade = ParseSignal(update.effective_message.text)
+    # gets MetaTrader account information
+    MetaApi.host = "trade.metaapi.io"
+    api = MetaApi(token=API_KEY)
+    account = await api.metatrader_get_account(accountId=ACCOUNT_ID)
+
+    balance = account['balance']
+
+    # receives trade signal from user
+    signal = update.message.text
+    trade = ParseSignal(signal)
+
+    # checks if an invalid signal was given and restarts the conversation
+    if(trade == {}):
+        update.effective_message.reply_text('Invalid Signal. Please enter a valid trading signal.')
+        return CALCULATE
+
+    # sends user trade information and calculated risk
+    GetTradeInformation(update, trade, balance)
+
+    # sends user decision message
+    update.effective_message.reply_text('Do you want to enter this trade?', reply_markup=ForceReply())
+
+    return DECISION
+
+async def Decision(update: Update, context: CallbackContext) -> int:
+    """Receives user decision and starts process of entering trade on MetaTrader account.
+
+    Arguments:
+        update: update from Telegram
+        context: CallbackContext object that stores commonly used objects in handler callbacks
+
+    Returns:
+        CALCULATE state for the conversation handler
+    """
+
+    # gets user decision
+    decision = update.message.text
+
+    # enters trade if user says 'yes'
+    if(decision.lower() == 'yes'):
+        MetaApi.host = "trade.metaapi.io"
+        api = MetaApi(token=API_KEY)
         
-        # checks if there was an issue with parsing the trade
-        if not trade:
-            raise Exception('Invalid Trade')
+        # opens trade
+        await api.metatrader_create_market_buy_order(accountId=ACCOUNT_ID, symbol=trade['Symbol'], volume=trade['PositionSize'], stopLoss=trade['StopLoss'], takeProfit=trade['TP'][0])
+        
+        # sends user confirmation message
+        update.effective_message.reply_text('Trade successfully entered. Good luck!')
 
-        update.effective_message.reply_text("Trade Successfully Parsed! 🥳\nConnecting to MetaTrader ... (May take a while) ⏰")
+        return CALCULATE
 
-        # attempts connection to MetaTrader and places trade
-        asyncio.run(ConnectMetaTrader(update, trade, True))
-    
-    except Exception as error:
-        logger.error(f'Error: {error}')
-        errorMessage = f"There was an error parsing this trade 😕\n\nError: {error}\n\nPlease re-enter trade with this format:\n\nBUY/SELL SYMBOL\nEntry \nSL \nTP \n\nOr use the /cancel to command to cancel this action."
-        update.effective_message.reply_text(errorMessage)
+    # restarts conversation if user says 'no'
+    elif(decision.lower() == 'no'):
+        update.effective_message.reply_text('Trade cancelled. Please enter a new trading signal.')
 
-    return
+        return CALCULATE
 
+    # asks user to confirm decision if input is not recognized
+    else:
+        update.effective_message.reply_text('Invalid input. Please enter "yes" or "no" to confirm if you want to enter this trade.')
 
-def main() -> None:
-    """Runs the Telegram bot."""
+        return DECISION
 
-    updater = Updater(TOKEN, use_context=True)
-
-    # get the dispatcher to register handlers
+async def main():
+    """Runs the bot."""
+    # sets up the updater and dispatcher
+    updater = Updater(TOKEN)
     dp = updater.dispatcher
 
-    # message handler
+    # adds handlers for different commands and messages
     dp.add_handler(CommandHandler("start", welcome))
+    dp.add_handler(CommandHandler("help", help_command))
+    dp.add_handler(CommandHandler("calculate", calculate))
+    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, receive_signal))
+    dp.add_handler(ConversationHandler(
+        entry_points=[MessageHandler(Filters.text & ~Filters.command, receive_signal)],
+        states={
+            CALCULATE: [MessageHandler(Filters.text & ~Filters.command, receive_signal)],
+            DECISION: [MessageHandler(Filters.text & ~Filters.command, decision)],
+        },
+        fallbacks=[],
+    ))
 
-    # help command handler
-    dp.add_handler(CommandHandler("help", help))
+    # starts the Bot
+    updater.start_polling()
 
-    # command handler for /trade
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, PlaceTrade))
-
-    # command handler for /cancel
-    dp.add_handler(CommandHandler("cancel", cancel))
-
-    # log all errors
-    dp.add_error_handler(error)
-    
-    # listens for incoming updates from Telegram
-    updater.start_webhook(listen="0.0.0.0", port=PORT, url_path=TOKEN, webhook_url=APP_URL + TOKEN)
+    # Run the bot until you send a signal to stop
     updater.idle()
 
-    return
-
-
 if __name__ == '__main__':
-    main()
+    asyncio.run(main())
